@@ -125,6 +125,19 @@ nudeploy hosts --group prod
 nudeploy shell --group prod --cmd 'uname -a'
 ```
 
+- Download artifacts locally (curl + extract):
+
+```shell
+# All enabled downloads in config
+nudeploy download
+
+# Only selected names
+nudeploy download --name openobserve
+
+# Alternate config file
+nudeploy download --config ./nudeploy.toml
+```
+
 ## Options
 
 - --config: Path to config TOML (default: ./nudeploy.toml)
@@ -134,6 +147,7 @@ nudeploy shell --group prod --cmd 'uname -a'
 - --cmd: Command to run for shell
 - --sudo: Use sudo for remote privileged actions (install to /etc, systemctl)
 - --json: Emit JSON output suitable for CI
+- --name: For `download`, comma-separated artifact names to fetch (defaults to all enabled)
 
 ## Idempotency strategy
 
@@ -145,6 +159,7 @@ nudeploy shell --group prod --cmd 'uname -a'
 ## Notes
 
 - nudeploy does not install software on remote machines; it only pushes your service unit/config and manages systemd
+- Local `download` subcommand reads `download_dir` and `[[downloads]]` from your config, fetches with curl, extracts by suffix (tar.gz/tgz, tar.xz, zip, tar, gz, xz), and removes archives after extraction.
 - For sudo prompts, passwordless sudo is recommended for automation
 
 ## Dev tips

@@ -4,20 +4,21 @@
 use lib.nu *
 
 export def main [
-  command: string # Commands: plan (show changes), deploy (apply changes), status (service status), restart (restart service), hosts (list hosts), shell (run command)
+  command: string # Commands: plan (show changes), deploy (apply changes), status (service status), restart (restart service), hosts (list hosts), shell (run command), download (fetch artifacts)
   --config: string # Path to config TOML (default: ./nudeploy.toml)
   --service: string # Service name; when omitted, operates on all services with enable=true
   --group: string # Filter hosts by group
   --hosts: string # Comma-separated host aliases (overrides --group)
   --cmd: string # Command to run on targets (required for shell)
   --sudo # Use sudo -n for remote privileged actions (systemctl, writes to protected paths)
+  --name: string # For download: comma-separated artifact names to fetch
   --json # Emit JSON records for CI-friendly output
 ] {
   let cfg_path = (if ($config | is-empty) { ([$env.PWD "nudeploy.toml"] | path join) } else { $config })
   let cfg = (load_config $cfg_path)
   let needs_service = ($command in ["plan" "deploy" "status" "restart"])
   let target_hosts = (select_targets $cfg $group $hosts)
-  if ($command != "hosts" and $command != "shell") {
+  if ($command != "hosts" and $command != "shell" and $command != "download") {
     if ($target_hosts | is-empty) { error make {msg: "No target hosts selected (check --group/--hosts or config)"} }
   }
   # Resolve service names to operate on
@@ -133,6 +134,11 @@ export def main [
           let rows = (restart_hosts_cmd $meta $target_hosts --sudo=$sudo)
           $acc | append ($rows | each {|r| $r | insert service $svc })
         }
+      }
+      "download" => {
+        let dl_conf = (load_downloads $cfg_path)
+        let names = (if ($name | is-empty) { [] } else { $name | split row "," | each {|it| $it | str trim } })
+        download_items $dl_conf $names
       }
       _ => { error make {msg: $"Unknown command: ($command)"} }
     }

@@ -285,3 +285,96 @@ export def list_hosts_cmd [cfg: record, group?: string, --all=false] {
     let hs = (if $all { $cfg.hosts } else { select_targets $cfg $group "" })
     $hs | each {|h| { name: $h.name, ip: ($h.ip? | default ""), port: ($h.port? | default 22), user: ($h.user? | default ""), group: ($h.group? | default ""), enable: ($h.enable? | default true) } }
 }
+
+# -------------------------------
+# Local downloads (curl + extract)
+# -------------------------------
+
+# Load only download-related config with sensible defaults
+export def load_downloads [path: string] {
+    mut p = $path
+    if (not ($p | path exists)) {
+        error make { msg: $"Config not found: ($path)" }
+    }
+    let raw = (open --raw $p)
+    let data = ($raw | from toml)
+    let dir = ($data.download_dir? | default "./downloads")
+    let items = ($data.downloads? | default [])
+    { download_dir: $dir, downloads: $items }
+}
+
+def infer_archive_type [filename: string] {
+    if ($filename | str ends-with ".tar.gz") { "tar.gz" } else if ($filename | str ends-with ".tgz") { "tar.gz" } else if ($filename | str ends-with ".tar.xz") { "tar.xz" } else if ($filename | str ends-with ".zip") { "zip" } else if ($filename | str ends-with ".tar") { "tar" } else if ($filename | str ends-with ".gz") { "gz" } else if ($filename | str ends-with ".xz") { "xz" } else { "file" }
+}
+
+def extract_archive [archive: string, etype: string, dir: string] {
+    match $etype {
+        "tar.gz" => { ^tar -xzf $archive -C $dir }
+        "tar.xz" => { ^tar -xJf $archive -C $dir }
+        "zip" => {
+            if (which unzip | is-not-empty) {
+                ^unzip -o $archive -d $dir | complete | ignore
+            } else if (which ditto | is-not-empty) {
+                ^ditto -x -k $archive $dir | complete | ignore
+            } else { error make { msg: "Neither unzip nor ditto found to extract zip" } }
+        }
+        "tar" => { ^tar -xf $archive -C $dir }
+        "gz" => {
+            if (which gunzip | is-not-empty) { ^gunzip -f $archive } else { error make { msg: "gunzip not found" } }
+        }
+        "xz" => {
+            if (which unxz | is-not-empty) { ^unxz -f $archive } else if (which xz | is-not-empty) { ^xz -d -f $archive } else { error make { msg: "xz/unxz not found" } }
+        }
+        _ => { }
+    }
+}
+
+def download_one [dir: string, d: record] {
+    let url = ($d.url | into string)
+    let filename = ($url | split row "/" | last)
+    let target_dir = ($dir | path expand)
+    let archive = ($target_dir | path join $filename)
+    mut events = []
+    mut ok = true
+    mut error = null
+    let etype = (infer_archive_type $filename)
+
+    mkdir $target_dir | ignore
+    ^curl --fail --silent --show-error -L -o $archive $url
+    $events = ($events | append "downloaded")
+    if ($etype != "file") {
+        extract_archive $archive $etype $target_dir
+        $events = ($events | append "extracted")
+        if ($etype in ["tar.gz", "tar.xz", "zip", "tar"]) {
+            rm -f $archive
+            $events = ($events | append "removed-archive")
+        }
+    } else {
+        $events = ($events | append "no-extract")
+    }
+
+    {
+        name: ($d.name? | default null),
+        version: ($d.version? | default null),
+        url: $url,
+        download_dir: $target_dir,
+        archive: $archive,
+        extract_type: $etype,
+        ok: $ok,
+        events: $events,
+        error: $error,
+    }
+}
+
+export def download_items [downloads_conf: record, names?: list<string> = []] {
+    let dir = ($downloads_conf.download_dir | path expand)
+    let items = (
+        if ($names | is-empty) {
+            $downloads_conf.downloads | where { |d| ($d.enable? | default true) }
+        } else {
+            let set = ($names | each {|n| $n | str trim } | uniq)
+            $downloads_conf.downloads | where { |d| $set | any {|n| $n == ($d.name | into string) } }
+        }
+    )
+    $items | each {|d| download_one $dir $d }
+}
