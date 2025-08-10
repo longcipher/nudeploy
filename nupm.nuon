@@ -1,0 +1,11 @@
+{
+  name: "nudeploy",
+  version: "0.1.0",
+  description: "Idempotent systemd deploy helper over SSH using Nushell",
+  license: "Apache-2.0",
+  repository: "https://github.com/longcipher/nudeploy",
+  homepage: "https://github.com/longcipher/nudeploy",
+  keywords: ["nushell", "systemd", "deploy", "ssh"],
+  bins: { nudeploy: "nudeploy.nu" },
+  modules: ["lib.nu"],
+}

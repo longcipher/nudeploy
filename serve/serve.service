@@ -1,0 +1,16 @@
+[Unit]
+Description=serve
+Wants=syslog.target network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=simple
+LimitNOFILE=65535
+ExecStart=/home/akagi201/bin/serve
+WorkingDirectory=/home/akagi201/tmp
+KillSignal=SIGINT
+Restart=on-failure
+User=akagi201
+
+[Install]
+WantedBy=multi-user.target
