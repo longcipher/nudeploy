@@ -48,10 +48,12 @@ export def build_service_meta [svc: record] {
     let sync_items = ($sync0 | each {|it|
         let from = ($it.from)
         let to = ($it.to)
-    let is_url = ((($from | str starts-with "http://") or ($from | str starts-with "https://")))
+        let has_chmod = (not (($it.chmod? | default "") | is-empty))
+        let mode_val = (if $has_chmod { ($it.chmod | into string) } else { "0644" })
+        let is_url = ((($from | str starts-with "http://") or ($from | str starts-with "https://")))
         let local_path = (if $is_url { null } else { if ($from | str starts-with "/") { $from } else { [$src_dir $from] | path join } })
         let dest_path = (if ($to | str starts-with "/") { $to } else { [$dst_dir $to] | path join })
-        { from: $from, to: $to, from_type: (if $is_url { "url" } else { "local" }), local_path: $local_path, url: (if $is_url { $from } else { null }), dest_path: $dest_path, mode: "0644" }
+        { from: $from, to: $to, from_type: (if $is_url { "url" } else { "local" }), local_path: $local_path, url: (if $is_url { $from } else { null }), dest_path: $dest_path, mode: $mode_val, chmod_after: $has_chmod }
     })
     {
         service_name: $name,
@@ -125,7 +127,7 @@ export def ensure_dir [h: record, path: string, --sudo=false] { ssh_run $h $"mkd
 
 export def ensure_parent_dir [h: record, path: string, --sudo=false] {
     let parent = ($path | path dirname)
-    ensure_dir $h $parent --sudo=$sudo | ignore
+    ensure_dir $h $parent --sudo=$sudo
 }
 
 export def install_file [h: record, tmp: string, dest: string, mode: string, --sudo=false] {
@@ -233,13 +235,15 @@ export def plan_host [meta: record, host: record, --sudo=false] {
 export def deploy_host [meta: record, host: record, --sudo=false] {
     mut changed = false
     mut events = []
-    ensure_dir $host $meta.dst_dir --sudo=$sudo | ignore
+    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=$sudo)
+    if ($mkdst.exit_code != 0) { error make { msg: $"mkdir failed for dst_dir: ($meta.dst_dir): ($mkdst.stderr | str trim)" } }
     # unit
     let unit_res = (compare_and_upload $host $meta $meta.unit_file $meta.unit_dest "0644" --sudo=$sudo)
     if ($unit_res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "unit", dest: $meta.unit_dest, reason: $unit_res.reason }) }
     # sync files
     for x in $meta.sync_items {
-        ensure_parent_dir $host $x.dest_path --sudo=$sudo | ignore
+        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=$sudo)
+        if ($mkparent.exit_code != 0) { error make { msg: $"mkdir failed for parent of: ($x.dest_path): ($mkparent.stderr | str trim)" } }
         if ($x.from_type == "local") {
             let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=$sudo)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "file", dest: $x.dest_path, reason: $res.reason }) }
@@ -247,15 +251,35 @@ export def deploy_host [meta: record, host: record, --sudo=false] {
             let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=$sudo)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "download", target: "file", dest: $x.dest_path, reason: $res.reason, source: $x.url }) }
         }
+        # If chmod explicitly configured, enforce it after sync with sudo
+        if ($x.chmod_after == true) {
+            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=true)
+            if ($ch.exit_code != 0) {
+                error make { msg: $"chmod failed for: ($x.dest_path): ($ch.stderr | str trim)" }
+            }
+            $events = ($events | append { type: "chmod", target: "file", dest: $x.dest_path, mode: $x.mode })
+        }
     }
-    if ($unit_res.changed) { ssh_run $host "systemctl daemon-reload" --sudo=$sudo | ignore; $events = ($events | append { type: "systemd", action: "daemon-reload" }) }
-    if ($meta.enable) { if (not (is_enabled $host $meta.service_name --sudo=$sudo)) { systemd_action $host $meta.service_name "enable" --sudo=$sudo | ignore; $events = ($events | append { type: "systemd", action: "enable" }) } }
+    if ($unit_res.changed) {
+        let dr = (ssh_run $host "systemctl daemon-reload" --sudo=$sudo)
+        if ($dr.exit_code != 0) { error make { msg: $"daemon-reload failed: ($dr.stderr | str trim)" } }
+        $events = ($events | append { type: "systemd", action: "daemon-reload" })
+    }
+    if ($meta.enable) {
+        if (not (is_enabled $host $meta.service_name --sudo=$sudo)) {
+            let en = (systemd_action $host $meta.service_name "enable" --sudo=$sudo)
+            if ($en.exit_code != 0) { error make { msg: $"systemctl enable failed: ($en.stderr | str trim)" } }
+            $events = ($events | append { type: "systemd", action: "enable" })
+        }
+    }
     if (not (is_active $host $meta.service_name --sudo=$sudo)) {
-        systemd_action $host $meta.service_name "start" --sudo=$sudo | ignore
+        let st = (systemd_action $host $meta.service_name "start" --sudo=$sudo)
+        if ($st.exit_code != 0) { error make { msg: $"systemctl start failed: ($st.stderr | str trim)" } }
         $events = ($events | append { type: "systemd", action: "start" })
     } else {
         if ($changed and $meta.restart == "on-change") {
-            systemd_action $host $meta.service_name "restart" --sudo=$sudo | ignore
+            let rr = (systemd_action $host $meta.service_name "restart" --sudo=$sudo)
+            if ($rr.exit_code != 0) { error make { msg: $"systemctl restart failed: ($rr.stderr | str trim)" } }
             $events = ($events | append { type: "systemd", action: "restart", cause: "changed" })
         }
     }

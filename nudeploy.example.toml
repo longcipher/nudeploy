@@ -5,7 +5,7 @@ download_dir = "./downloads"
 [[downloads]]
 name = "openobserve"
 version = "v0.15.0-rc5"
-url = "https://downloads.openobserve.ai/releases/openobserve/v0.15.0-rc4/openobserve-v0.15.0-rc4-linux-amd64-simd.tar.gz"
+url = "https://downloads.openobserve.ai/releases/openobserve/v0.15.0-rc4/openobserve-v0.15.0-rc4-linux-amd64.tar.gz"
 enable = true
 
 [[hosts]]

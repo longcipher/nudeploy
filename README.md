@@ -29,6 +29,8 @@ sync_files = [
   { from = "foo.conf", to = "bar.conf" },
   # Support downloading on remote directly:
   # { from = "https://example.com/file.conf", to = "bar.conf" }
+  # Optional per-file chmod (applied with sudo after sync); defaults to "0644"
+  # { from = "bin/myapp", to = "bin/myapp", chmod = "0755" },
 ]
 restart = true   # restart service when files changed
 enable = true    # enable service (default true)
@@ -152,6 +154,7 @@ nudeploy download --config ./nudeploy.toml
 ## Idempotency strategy
 
 - Files are uploaded only if remote checksum differs
+- Optional chmod is enforced after sync (with sudo) when `chmod` is set on an item
 - Systemd daemon-reload runs only when unit changed
 - Service is enabled once if not enabled
 - Service is restarted only when changes detected (or restart mode forces it)
@@ -159,6 +162,7 @@ nudeploy download --config ./nudeploy.toml
 ## Notes
 
 - nudeploy does not install software on remote machines; it only pushes your service unit/config and manages systemd
+- Per-file permissions: set `chmod = "0755"` on binaries you need to execute; default mode is `0644`.
 - Local `download` subcommand reads `download_dir` and `[[downloads]]` from your config, fetches with curl, extracts by suffix (tar.gz/tgz, tar.xz, zip, tar, gz, xz), and removes archives after extraction.
 - For sudo prompts, passwordless sudo is recommended for automation
 
