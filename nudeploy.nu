@@ -4,12 +4,13 @@
 use lib.nu *
 
 export def main [
-  command: string # Commands: plan (show changes), deploy (apply changes), status (service status), restart (restart service), hosts (list hosts), shell (run command), download (fetch artifacts)
+  command: string # Commands: plan (show changes), deploy (apply changes), status (service status), restart (restart service), hosts (list hosts), shell (run command), play (run line-by-line playbook), download (fetch artifacts)
   --config: string # Path to config TOML (default: ./nudeploy.toml)
   --service: string # Service name; when omitted, operates on all services with enable=true
   --group: string # Filter hosts by group
   --hosts: string # Comma-separated host aliases (overrides --group)
   --cmd: string # Command to run on targets (required for shell)
+  --file: string # For play: path to a text file with one command per line (blank lines and # comments ignored)
   --sudo # Use sudo -n for remote privileged actions (systemctl, writes to protected paths)
   --name: string # For download: comma-separated artifact names to fetch
   --json # Emit JSON records for CI-friendly output
@@ -18,7 +19,7 @@ export def main [
   let cfg = (load_config $cfg_path)
   let needs_service = ($command in ["plan" "deploy" "status" "restart"])
   let target_hosts = (select_targets $cfg $group $hosts)
-  if ($command != "hosts" and $command != "shell" and $command != "download") {
+  if ($command != "hosts" and $command != "shell" and $command != "download" and $command != "play") {
     if ($target_hosts | is-empty) { error make {msg: "No target hosts selected (check --group/--hosts or config)"} }
   }
   # Resolve service names to operate on
@@ -35,6 +36,28 @@ export def main [
         if ($cmd | is-empty) { error make {msg: "--cmd is required for shell"} }
         if ($target_hosts | is-empty) { error make {msg: "No hosts selected for shell (use --group or --hosts)"} }
         $target_hosts | each {|h| shell_host $h $cmd --sudo=$sudo }
+      }
+      "play" => {
+        if ($file | is-empty) { error make {msg: "--file is required for play"} }
+        if (not ($file | path exists)) { error make {msg: $"Playbook not found: ($file)"} }
+        if ($target_hosts | is-empty) { error make {msg: "No hosts selected for play (use --group or --hosts)"} }
+        let lines = (parse_playbook $file)
+        let rows = ($target_hosts | each {|h| play_host $h $lines --sudo=$sudo })
+        if $json {
+          $rows
+        } else {
+          let summary = ($rows | each {|r| { host: $r.host ok: $r.ok failed_line: ($r.failed_line? | default null) exit: ($r.exit? | default null) } })
+          $summary | table -e
+          for r in $rows {
+            if (not $r.ok) {
+              print $"\nHost: ($r.host) FAILED at line ($r.failed_line)"
+              print $"Cmd:    (($r.failed_cmd? | default ""))"
+              let se = ($r.stderr? | default "")
+              if ($se | is-not-empty) { print $"Stderr: ($se)" }
+            }
+          }
+          $summary
+        }
       }
       "plan" => {
         if $json {

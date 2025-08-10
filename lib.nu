@@ -314,6 +314,56 @@ export def list_hosts_cmd [cfg: record, group?: string, --all=false] {
 # Local downloads (curl + extract)
 # -------------------------------
 
+# -------------------------------
+# Playbook helpers (line-by-line Nushell/bash commands over SSH)
+# -------------------------------
+
+export def parse_playbook [path: string] {
+    let raw = (open --raw $path)
+    $raw
+    | lines
+    | enumerate
+    | reduce -f [] {|it, acc|
+        let line_no = ($it.index + 1)
+        let line = ($it.item | str trim)
+        if (($line | is-empty) or ($line | str starts-with "#")) {
+            $acc
+        } else {
+            $acc | append { line: $line_no, cmd: $it.item }
+        }
+    }
+}
+
+export def play_host [host: record, steps: list<record>, --sudo=false] {
+    mut events = []
+    mut ok = true
+    mut failed_line = null
+    mut failed_cmd = null
+    mut exit = 0
+    mut stderr = ""
+    for s in $steps {
+        let res = (ssh_run $host $s.cmd --sudo=$sudo)
+        $events = ($events | append { line: $s.line cmd: $s.cmd exit: $res.exit_code stdout: ($res.stdout | str trim) stderr: ($res.stderr | str trim) })
+        if ($res.exit_code != 0) {
+            $ok = false
+            $failed_line = $s.line
+            $failed_cmd = $s.cmd
+            $exit = $res.exit_code
+            $stderr = ($res.stderr | str trim)
+            break
+        }
+    }
+    {
+        host: ($host.name | default (build_target $host).login),
+        ok: $ok,
+        failed_line: $failed_line,
+        failed_cmd: $failed_cmd,
+        exit: $exit,
+        stderr: $stderr,
+        events: $events
+    }
+}
+
 # Load only download-related config with sensible defaults
 export def load_downloads [path: string] {
     mut p = $path

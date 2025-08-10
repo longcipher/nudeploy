@@ -8,6 +8,7 @@
 # @cmd restart     Restart the service on targets without syncing files
 # @cmd hosts       List hosts (optionally filtered by group); prints name/ip/port/user/group/enabled
 # @cmd shell       Run an arbitrary shell command on selected hosts (use with --cmd)
+# @cmd play        Execute a line-by-line playbook file on selected hosts; stops on first error and reports failing line
 # @cmd download    Download artifacts defined in [[downloads]] to download_dir and extract them
 #
 # @option --config!     Path to config TOML (default: ./nudeploy.toml)
@@ -15,6 +16,7 @@
 # @option --group       Filter targets by group from the config
 # @option --hosts       Comma-separated host aliases (overrides --group)
 # @option --cmd         Command to run when using the `shell` subcommand
+# @option --file        Path to a playbook file for `play` (one command per line; # comments and blank lines ignored)
 # @option --name        For download: comma-separated artifact names to fetch (default: all enabled)
 # @flag --sudo          Use sudo -n for remote privileged actions (install to /etc, systemctl)
 # @flag --json          Emit JSON records suitable for CI (changes/events/status per host)

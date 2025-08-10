@@ -127,6 +127,12 @@ nudeploy hosts --group prod
 nudeploy shell --group prod --cmd 'uname -a'
 ```
 
+- Run a playbook (line-by-line, stop on error):
+
+```shell
+nudeploy play --group prod --file playbooks/arch.nu
+```
+
 - Download artifacts locally (curl + extract):
 
 ```shell
@@ -147,6 +153,7 @@ nudeploy download --config ./nudeploy.toml
 - --group: Hosts group
 - --hosts: Comma-separated hostnames (SSH Host aliases)
 - --cmd: Command to run for shell
+- --file: Path to playbook file for `play` (one command per line; `#` comments and blank lines ignored)
 - --sudo: Use sudo for remote privileged actions (install to /etc, systemctl)
 - --json: Emit JSON output suitable for CI
 - --name: For `download`, comma-separated artifact names to fetch (defaults to all enabled)
@@ -165,6 +172,23 @@ nudeploy download --config ./nudeploy.toml
 - Per-file permissions: set `chmod = "0755"` on binaries you need to execute; default mode is `0644`.
 - Local `download` subcommand reads `download_dir` and `[[downloads]]` from your config, fetches with curl, extracts by suffix (tar.gz/tgz, tar.xz, zip, tar, gz, xz), and removes archives after extraction.
 - For sudo prompts, passwordless sudo is recommended for automation
+
+### Playbooks
+
+Playbooks are simple text files that nudeploy executes remotely, one command per line. Ensure each line is idempotent. On the first failure (non-zero exit code), execution stops for that host and the failing line and command are reported. Use `--sudo` when commands require privileges.
+
+Example `playbooks/bootstrap.sh`:
+
+```sh
+# Ensure curl exists
+which curl >/dev/null 2>&1 || (apt-get update -y && apt-get install -y curl)
+
+# Create user if missing
+id -u deploy >/dev/null 2>&1 || useradd -m -s /bin/bash deploy
+
+# Ensure directory and ownership
+mkdir -p /opt/myapp && chown -R deploy:deploy /opt/myapp
+```
 
 ## Dev tips
 
