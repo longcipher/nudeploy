@@ -11,7 +11,7 @@ export def main [
   --hosts: string # Comma-separated host aliases (overrides --group)
   --cmd: string # Command to run on targets (required for shell)
   --file: string # For play: path to a text file with one command per line (blank lines and # comments ignored)
-  --sudo # Use sudo -n for remote privileged actions (systemctl, writes to protected paths)
+  --sudo # Use sudo -n for systemctl actions and unit install to /etc; other file and directory operations run as the SSH user
   --name: string # For download: comma-separated artifact names to fetch
   --json # Emit JSON records for CI-friendly output
 ] {

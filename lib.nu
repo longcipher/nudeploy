@@ -147,8 +147,8 @@ export def compare_and_upload [h: record, svc: record, local_path: string, dest_
             if ($res1.exit_code != 0) { error make { msg: $"scp failed: ($res1.stderr)" } }
             let res2 = (install_file $h $tmp $dest_path $mode --sudo=$sudo)
             if ($res2.exit_code != 0) {
-                let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied")) { " (try --sudo)" } else { "" })
-                error make { msg: $"remote install failed: ($res2.stderr)($hint)" }
+                let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied") and ($dest_path | str starts-with "/etc/")) { " (unit under /etc; try --sudo)" } else { "" })
+                error make { msg: $"remote install failed: (($res2.stderr | str trim))($hint)" }
             }
             { changed: true, reason: "copied" }
     }
@@ -168,8 +168,8 @@ export def remote_download_and_place [h: record, svc: record, url: string, dest_
     } else {
         let res2 = (install_file $h $tmp $dest_path $mode --sudo=$sudo)
         if ($res2.exit_code != 0) {
-            let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied")) { " (try --sudo)" } else { "" })
-            error make { msg: $"remote install failed: ($res2.stderr)($hint)" }
+            let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied") and ($dest_path | str starts-with "/etc/")) { " (unit under /etc; try --sudo)" } else { "" })
+            error make { msg: $"remote install failed: (($res2.stderr | str trim))($hint)" }
         }
         { changed: true, reason: "downloaded" }
     }
@@ -235,25 +235,26 @@ export def plan_host [meta: record, host: record, --sudo=false] {
 export def deploy_host [meta: record, host: record, --sudo=false] {
     mut changed = false
     mut events = []
-    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=$sudo)
+    # File/dir operations run as SSH user even when --sudo is set; only systemd actions use sudo.
+    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=false)
     if ($mkdst.exit_code != 0) { error make { msg: $"mkdir failed for dst_dir: ($meta.dst_dir): ($mkdst.stderr | str trim)" } }
-    # unit
+    # unit upload goes to /etc; honor --sudo here. Other file/dir ops below run as SSH user.
     let unit_res = (compare_and_upload $host $meta $meta.unit_file $meta.unit_dest "0644" --sudo=$sudo)
     if ($unit_res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "unit", dest: $meta.unit_dest, reason: $unit_res.reason }) }
     # sync files
     for x in $meta.sync_items {
-        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=$sudo)
+        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=false)
         if ($mkparent.exit_code != 0) { error make { msg: $"mkdir failed for parent of: ($x.dest_path): ($mkparent.stderr | str trim)" } }
         if ($x.from_type == "local") {
-            let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=$sudo)
+            let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=false)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "file", dest: $x.dest_path, reason: $res.reason }) }
         } else {
-            let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=$sudo)
+            let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=false)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "download", target: "file", dest: $x.dest_path, reason: $res.reason, source: $x.url }) }
         }
         # If chmod explicitly configured, enforce it after sync with sudo
         if ($x.chmod_after == true) {
-            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=true)
+            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=false)
             if ($ch.exit_code != 0) {
                 error make { msg: $"chmod failed for: ($x.dest_path): ($ch.stderr | str trim)" }
             }

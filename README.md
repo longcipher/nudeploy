@@ -154,14 +154,14 @@ nudeploy download --config ./nudeploy.toml
 - --hosts: Comma-separated hostnames (SSH Host aliases)
 - --cmd: Command to run for shell
 - --file: Path to playbook file for `play` (one command per line; `#` comments and blank lines ignored)
-- --sudo: Use sudo for remote privileged actions (install to /etc, systemctl)
+- --sudo: Use sudo for systemd actions (daemon-reload/enable/start/restart) and installing unit files into /etc. All other file and directory operations run as the SSH user.
 - --json: Emit JSON output suitable for CI
 - --name: For `download`, comma-separated artifact names to fetch (defaults to all enabled)
 
 ## Idempotency strategy
 
 - Files are uploaded only if remote checksum differs
-- Optional chmod is enforced after sync (with sudo) when `chmod` is set on an item
+- Optional chmod is enforced after sync as the SSH user when `chmod` is set on an item
 - Systemd daemon-reload runs only when unit changed
 - Service is enabled once if not enabled
 - Service is restarted only when changes detected (or restart mode forces it)
@@ -293,7 +293,8 @@ Note: The main entry is `nudeploy.sh`. You can symlink it to `nudeploy` to match
 ## Troubleshooting
 
 - First SSH to a host prompts for key: we use `StrictHostKeyChecking=accept-new` which will trust new hosts on first connect.
-- Permission denied (sudo): configure passwordless sudo for your deployment user, or run with a TTY if prompts are needed.
+- Permission denied writing files: destinations must be writable by the SSH user. Pre-create directories/files with proper ownership if needed.
+- Permission denied (systemctl): configure passwordless sudo for systemctl for your deployment user, or run with a TTY if prompts are needed.
 - Remote host missing hasher: needs one of `sha256sum`, `shasum`, or `openssl`. Install `coreutils` or `perl` packages accordingly.
 - Remote not systemd: this tool targets systemd-based Linux. Non-systemd hosts aren’t supported.
 - Unit not restarting: with `restart = true`, restarts occur when files changed; otherwise not.
