@@ -117,9 +117,9 @@ export def local_sha256 [path: string] {
 
 export def parse_hash_output [s: string] { if ($s | str contains "=") { $s | split row "=" | last | str trim } else { $s | split row ' ' | first | str trim } }
 
-export def remote_sha256 [h: record, path: string] {
+export def remote_sha256 [h: record, path: string, --sudo=false] {
         let script = $"if [ -f '($path)' ]; then if command -v sha256sum >/dev/null 2>&1; then sha256sum -b '($path)' | cut -d ' ' -f1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 '($path)' | cut -d ' ' -f1; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 '($path)' | sed -e 's/^.*= //'; else echo NONE; fi; else echo MISSING; fi"
-    let res = (ssh_run $h $script)
+    let res = (ssh_run $h $script --sudo=$sudo)
     if ($res.exit_code != 0) { "ERROR" } else { $res.stdout | str trim }
 }
 
@@ -137,7 +137,7 @@ export def install_file [h: record, tmp: string, dest: string, mode: string, --s
 
 export def compare_and_upload [h: record, svc: record, local_path: string, dest_path: string, mode: string, --sudo=false] {
     let local_hash = (local_sha256 $local_path)
-    let rhash = (remote_sha256 $h $dest_path)
+    let rhash = (remote_sha256 $h $dest_path --sudo=$sudo)
     if ($rhash == $local_hash) {
         { changed: false, reason: "up-to-date" }
     } else {
@@ -155,7 +155,7 @@ export def compare_and_upload [h: record, svc: record, local_path: string, dest_
 }
 
 export def remote_download_and_place [h: record, svc: record, url: string, dest_path: string, mode: string, --sudo=false] {
-    let current_hash = (remote_sha256 $h $dest_path)
+    let current_hash = (remote_sha256 $h $dest_path --sudo=$sudo)
     let uid = (random uuid)
     let tmp = $"/tmp/nudeploy-($svc.service_name)-dl-($uid).tmp"
     let dl = (ssh_run $h $"set -e; if command -v curl >/dev/null 2>&1; then curl -fsSL '($url)' -o '($tmp)'; elif command -v wget >/dev/null 2>&1; then wget -qO '($tmp)' '($url)'; else echo 'ERR:NO_DOWNLOADER' >&2; exit 127; fi")
@@ -183,12 +183,12 @@ export def is_active [h: record, svc_name: string, --sudo=false] { let r = (ssh_
 
 export def plan_host [meta: record, host: record, --sudo=false] {
     let unit_local = (local_sha256 $meta.unit_file)
-    let unit_remote = (remote_sha256 $host $meta.unit_dest)
+    let unit_remote = (remote_sha256 $host $meta.unit_dest --sudo=$sudo)
     let unit_action = (if ($unit_remote != $unit_local) { "upload-unit" } else { "ok" })
     # Build per-file plan details
     let file_plans = (
         $meta.sync_items | each {|x|
-            let remote_hash = (remote_sha256 $host $x.dest_path)
+            let remote_hash = (remote_sha256 $host $x.dest_path --sudo=$sudo)
             if ($x.from_type == "local") {
                 let local_hash = (local_sha256 $x.local_path)
                 if ($remote_hash == "MISSING") {
@@ -236,25 +236,25 @@ export def deploy_host [meta: record, host: record, --sudo=false] {
     mut changed = false
     mut events = []
     # File/dir operations run as SSH user even when --sudo is set; only systemd actions use sudo.
-    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=false)
+    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=$sudo)
     if ($mkdst.exit_code != 0) { error make { msg: $"mkdir failed for dst_dir: ($meta.dst_dir): ($mkdst.stderr | str trim)" } }
     # unit upload goes to /etc; honor --sudo here. Other file/dir ops below run as SSH user.
     let unit_res = (compare_and_upload $host $meta $meta.unit_file $meta.unit_dest "0644" --sudo=$sudo)
     if ($unit_res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "unit", dest: $meta.unit_dest, reason: $unit_res.reason }) }
     # sync files
     for x in $meta.sync_items {
-        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=false)
+        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=$sudo)
         if ($mkparent.exit_code != 0) { error make { msg: $"mkdir failed for parent of: ($x.dest_path): ($mkparent.stderr | str trim)" } }
         if ($x.from_type == "local") {
-            let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=false)
+            let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=$sudo)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "file", dest: $x.dest_path, reason: $res.reason }) }
         } else {
-            let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=false)
+            let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=$sudo)
             if ($res.changed) { $changed = true; $events = ($events | append { type: "download", target: "file", dest: $x.dest_path, reason: $res.reason, source: $x.url }) }
         }
         # If chmod explicitly configured, enforce it after sync with sudo
         if ($x.chmod_after == true) {
-            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=false)
+            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=$sudo)
             if ($ch.exit_code != 0) {
                 error make { msg: $"chmod failed for: ($x.dest_path): ($ch.stderr | str trim)" }
             }
