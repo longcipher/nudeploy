@@ -49,6 +49,18 @@ You can target hosts by group or explicitly via `--hosts hostA,hostB`.
 
 ## Install
 
+### Quick Install (Bash script)
+
+This installs `nudeploy` to `~/.local/bin`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/longcipher/nudeploy/main/install.sh | bash
+```
+
+Ensure `~/.local/bin` is in your `$PATH`.
+
+### Manual Install
+
 - Ensure Nushell is installed:
   - brew install nushell
 - Make the wrapper executable:

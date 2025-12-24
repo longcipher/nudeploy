@@ -78,7 +78,7 @@ def build_target [h: record] {
 
 export def ssh_run [h: record, cmd: string, --sudo=false] {
     let t = (build_target $h)
-    let full = (if $sudo { $"sudo -n bash -lc '($cmd)'" } else { $"bash -lc '($cmd)'" })
+    let full = (if $sudo { $"sudo -n sh -lc '($cmd)'" } else { $"sh -lc '($cmd)'" })
     if ($t.port == null) {
         (^ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new $t.login $full | complete)
     } else {
@@ -123,7 +123,10 @@ export def remote_sha256 [h: record, path: string, --sudo=false] {
     if ($res.exit_code != 0) { "ERROR" } else { $res.stdout | str trim }
 }
 
-export def ensure_dir [h: record, path: string, --sudo=false] { ssh_run $h $"mkdir -p '($path)'" --sudo=$sudo }
+export def ensure_dir [h: record, path: string, --sudo=false] {
+    let cmd = $"if [ ! -d '($path)' ]; then if command -v install >/dev/null 2>&1; then install -d '($path)'; else mkdir -p '($path)'; fi; fi"
+    ssh_run $h $cmd --sudo=$sudo
+}
 
 export def ensure_parent_dir [h: record, path: string, --sudo=false] {
     let parent = ($path | path dirname)
@@ -158,21 +161,27 @@ export def remote_download_and_place [h: record, svc: record, url: string, dest_
     let current_hash = (remote_sha256 $h $dest_path --sudo=$sudo)
     let uid = (random uuid)
     let tmp = $"/tmp/nudeploy-($svc.service_name)-dl-($uid).tmp"
-    let dl = (ssh_run $h $"set -e; if command -v curl >/dev/null 2>&1; then curl -fsSL '($url)' -o '($tmp)'; elif command -v wget >/dev/null 2>&1; then wget -qO '($tmp)' '($url)'; else echo 'ERR:NO_DOWNLOADER' >&2; exit 127; fi")
-    if ($dl.exit_code != 0) { error make { msg: $"remote download failed: ($dl.stderr | str trim)" } }
-    let new_hash = (remote_sha256 $h $tmp)
-    if ($new_hash == $current_hash) {
-        # no change; remove tmp
-        ssh_run $h $"rm -f '($tmp)'" | ignore
-        { changed: false, reason: "up-to-date" }
-    } else {
-        let res2 = (install_file $h $tmp $dest_path $mode --sudo=$sudo)
-        if ($res2.exit_code != 0) {
-            let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied") and ($dest_path | str starts-with "/etc/")) { " (unit under /etc; try --sudo)" } else { "" })
-            error make { msg: $"remote install failed: (($res2.stderr | str trim))($hint)" }
+    
+    let res = (try {
+        let dl = (ssh_run $h $"set -e; if command -v curl >/dev/null 2>&1; then curl -fsSL '($url)' -o '($tmp)'; elif command -v wget >/dev/null 2>&1; then wget -qO '($tmp)' '($url)'; else echo 'ERR:NO_DOWNLOADER' >&2; exit 127; fi")
+        if ($dl.exit_code != 0) { error make { msg: $"remote download failed: ($dl.stderr | str trim)" } }
+        let new_hash = (remote_sha256 $h $tmp)
+        if ($new_hash == $current_hash) {
+            { changed: false, reason: "up-to-date" }
+        } else {
+            let res2 = (install_file $h $tmp $dest_path $mode --sudo=$sudo)
+            if ($res2.exit_code != 0) {
+                let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied") and ($dest_path | str starts-with "/etc/")) { " (unit under /etc; try --sudo)" } else { "" })
+                error make { msg: $"remote install failed: (($res2.stderr | str trim))($hint)" }
+            }
+            { changed: true, reason: "downloaded" }
         }
-        { changed: true, reason: "downloaded" }
-    }
+    } catch {|e|
+        ssh_run $h $"rm -f '($tmp)'" | ignore
+        error make { msg: $e.msg }
+    })
+    ssh_run $h $"rm -f '($tmp)'" | ignore
+    $res
 }
 
 export def systemd_action [h: record, svc_name: string, action: string, --sudo=false] { ssh_run $h $"systemctl ($action) '($svc_name)'" --sudo=$sudo }
@@ -233,58 +242,77 @@ export def plan_host [meta: record, host: record, --sudo=false] {
 }
 
 export def deploy_host [meta: record, host: record, --sudo=false] {
-    mut changed = false
-    mut events = []
-    # File/dir operations run as SSH user even when --sudo is set; only systemd actions use sudo.
-    let mkdst = (ensure_dir $host $meta.dst_dir --sudo=$sudo)
-    if ($mkdst.exit_code != 0) { error make { msg: $"mkdir failed for dst_dir: ($meta.dst_dir): ($mkdst.stderr | str trim)" } }
-    # unit upload goes to /etc; honor --sudo here. Other file/dir ops below run as SSH user.
-    let unit_res = (compare_and_upload $host $meta $meta.unit_file $meta.unit_dest "0644" --sudo=$sudo)
-    if ($unit_res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "unit", dest: $meta.unit_dest, reason: $unit_res.reason }) }
-    # sync files
-    for x in $meta.sync_items {
-        let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=$sudo)
-        if ($mkparent.exit_code != 0) { error make { msg: $"mkdir failed for parent of: ($x.dest_path): ($mkparent.stderr | str trim)" } }
-        if ($x.from_type == "local") {
-            let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=$sudo)
-            if ($res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "file", dest: $x.dest_path, reason: $res.reason }) }
-        } else {
-            let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=$sudo)
-            if ($res.changed) { $changed = true; $events = ($events | append { type: "download", target: "file", dest: $x.dest_path, reason: $res.reason, source: $x.url }) }
-        }
-        # If chmod explicitly configured, enforce it after sync with sudo
-        if ($x.chmod_after == true) {
-            let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=$sudo)
-            if ($ch.exit_code != 0) {
-                error make { msg: $"chmod failed for: ($x.dest_path): ($ch.stderr | str trim)" }
+    try {
+        mut changed = false
+        mut events = []
+        # Determine target user for ownership if sudo is used
+        let target_user = (if $sudo {
+            if ($host.user? | is-not-empty) { $host.user } else {
+                # Fallback: try to get login user from remote
+                let who = (ssh_run $host "whoami")
+                if ($who.exit_code == 0) { $who.stdout | str trim } else { "root" }
             }
-            $events = ($events | append { type: "chmod", target: "file", dest: $x.dest_path, mode: $x.mode })
+        } else { null })
+
+        # File/dir operations run as SSH user even when --sudo is set; only systemd actions use sudo.
+        let mkdst = (ensure_dir $host $meta.dst_dir --sudo=$sudo)
+        if ($mkdst.exit_code != 0) { error make { msg: $"mkdir failed for dst_dir: ($meta.dst_dir): ($mkdst.stderr | str trim)" } }
+        # unit upload goes to /etc; honor --sudo here. Other file/dir ops below run as SSH user.
+        let unit_res = (compare_and_upload $host $meta $meta.unit_file $meta.unit_dest "0644" --sudo=$sudo)
+        if ($unit_res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "unit", dest: $meta.unit_dest, reason: $unit_res.reason }) }
+        # sync files
+        for x in $meta.sync_items {
+            let mkparent = (ensure_parent_dir $host $x.dest_path --sudo=$sudo)
+            if ($mkparent.exit_code != 0) { error make { msg: $"mkdir failed for parent of: ($x.dest_path): ($mkparent.stderr | str trim)" } }
+            if ($x.from_type == "local") {
+                let res = (compare_and_upload $host $meta $x.local_path $x.dest_path $x.mode --sudo=$sudo)
+                if ($res.changed) { $changed = true; $events = ($events | append { type: "upload", target: "file", dest: $x.dest_path, reason: $res.reason }) }
+            } else {
+                let res = (remote_download_and_place $host $meta $x.url $x.dest_path $x.mode --sudo=$sudo)
+                if ($res.changed) { $changed = true; $events = ($events | append { type: "download", target: "file", dest: $x.dest_path, reason: $res.reason, source: $x.url }) }
+            }
+            
+            # Fix ownership if sudo
+            if ($sudo and ($target_user | is-not-empty)) {
+                ssh_run $host $"chown ($target_user): '($x.dest_path)'" --sudo=true | ignore
+            }
+
+            # If chmod explicitly configured, enforce it after sync with sudo
+            if ($x.chmod_after == true) {
+                let ch = (ssh_run $host $"chmod ($x.mode) '($x.dest_path)'" --sudo=$sudo)
+                if ($ch.exit_code != 0) {
+                    error make { msg: $"chmod failed for: ($x.dest_path): ($ch.stderr | str trim)" }
+                }
+                $events = ($events | append { type: "chmod", target: "file", dest: $x.dest_path, mode: $x.mode })
+            }
         }
-    }
-    if ($unit_res.changed) {
-        let dr = (ssh_run $host "systemctl daemon-reload" --sudo=$sudo)
-        if ($dr.exit_code != 0) { error make { msg: $"daemon-reload failed: ($dr.stderr | str trim)" } }
-        $events = ($events | append { type: "systemd", action: "daemon-reload" })
-    }
-    if ($meta.enable) {
-        if (not (is_enabled $host $meta.service_name --sudo=$sudo)) {
-            let en = (systemd_action $host $meta.service_name "enable" --sudo=$sudo)
-            if ($en.exit_code != 0) { error make { msg: $"systemctl enable failed: ($en.stderr | str trim)" } }
-            $events = ($events | append { type: "systemd", action: "enable" })
+        if ($unit_res.changed) {
+            let dr = (ssh_run $host "systemctl daemon-reload" --sudo=$sudo)
+            if ($dr.exit_code != 0) { error make { msg: $"daemon-reload failed: ($dr.stderr | str trim)" } }
+            $events = ($events | append { type: "systemd", action: "daemon-reload" })
         }
-    }
-    if (not (is_active $host $meta.service_name --sudo=$sudo)) {
-        let st = (systemd_action $host $meta.service_name "start" --sudo=$sudo)
-        if ($st.exit_code != 0) { error make { msg: $"systemctl start failed: ($st.stderr | str trim)" } }
-        $events = ($events | append { type: "systemd", action: "start" })
-    } else {
-        if ($changed and $meta.restart == "on-change") {
-            let rr = (systemd_action $host $meta.service_name "restart" --sudo=$sudo)
-            if ($rr.exit_code != 0) { error make { msg: $"systemctl restart failed: ($rr.stderr | str trim)" } }
-            $events = ($events | append { type: "systemd", action: "restart", cause: "changed" })
+        if ($meta.enable) {
+            if (not (is_enabled $host $meta.service_name --sudo=$sudo)) {
+                let en = (systemd_action $host $meta.service_name "enable" --sudo=$sudo)
+                if ($en.exit_code != 0) { error make { msg: $"systemctl enable failed: ($en.stderr | str trim)" } }
+                $events = ($events | append { type: "systemd", action: "enable" })
+            }
         }
+        if (not (is_active $host $meta.service_name --sudo=$sudo)) {
+            let st = (systemd_action $host $meta.service_name "start" --sudo=$sudo)
+            if ($st.exit_code != 0) { error make { msg: $"systemctl start failed: ($st.stderr | str trim)" } }
+            $events = ($events | append { type: "systemd", action: "start" })
+        } else {
+            if ($changed and $meta.restart == "on-change") {
+                let rr = (systemd_action $host $meta.service_name "restart" --sudo=$sudo)
+                if ($rr.exit_code != 0) { error make { msg: $"systemctl restart failed: ($rr.stderr | str trim)" } }
+                $events = ($events | append { type: "systemd", action: "restart", cause: "changed" })
+            }
+        }
+        { host: ($host.name | default (build_target $host).login), changed: $changed, events: $events }
+    } catch {|e|
+        { host: ($host.name | default (build_target $host).login), changed: false, events: [], error: $e.msg }
     }
-    { host: ($host.name | default (build_target $host).login), changed: $changed, events: $events }
 }
 
 export def status_host [meta: record, host: record, --sudo=false] {
@@ -373,76 +401,68 @@ export def load_downloads [path: string] {
     }
     let raw = (open --raw $p)
     let data = ($raw | from toml)
-    let dir = ($data.download_dir? | default "./downloads")
     let items = ($data.downloads? | default [])
-    { download_dir: $dir, downloads: $items }
+    { downloads: $items }
 }
 
 def infer_archive_type [filename: string] {
     if ($filename | str ends-with ".tar.gz") { "tar.gz" } else if ($filename | str ends-with ".tgz") { "tar.gz" } else if ($filename | str ends-with ".tar.xz") { "tar.xz" } else if ($filename | str ends-with ".zip") { "zip" } else if ($filename | str ends-with ".tar") { "tar" } else if ($filename | str ends-with ".gz") { "gz" } else if ($filename | str ends-with ".xz") { "xz" } else { "file" }
 }
 
-def extract_archive [archive: string, etype: string, dir: string] {
-    match $etype {
-        "tar.gz" => { ^tar -xzf $archive -C $dir }
-        "tar.xz" => { ^tar -xJf $archive -C $dir }
-        "zip" => {
-            if (which unzip | is-not-empty) {
-                ^unzip -o $archive -d $dir | complete | ignore
-            } else if (which ditto | is-not-empty) {
-                ^ditto -x -k $archive $dir | complete | ignore
-            } else { error make { msg: "Neither unzip nor ditto found to extract zip" } }
-        }
-        "tar" => { ^tar -xf $archive -C $dir }
-        "gz" => {
-            if (which gunzip | is-not-empty) { ^gunzip -f $archive } else { error make { msg: "gunzip not found" } }
-        }
-        "xz" => {
-            if (which unxz | is-not-empty) { ^unxz -f $archive } else if (which xz | is-not-empty) { ^xz -d -f $archive } else { error make { msg: "xz/unxz not found" } }
-        }
-        _ => { }
-    }
-}
-
-def download_one [dir: string, d: record] {
+export def remote_download_item [host: record, d: record, --sudo=false] {
     let url = ($d.url | into string)
+    let dst_dir = ($d.dst_dir? | default "/tmp")
+    let extract = ($d.extract? | default false)
     let filename = ($url | split row "/" | last)
-    let target_dir = ($dir | path expand)
-    let archive = ($target_dir | path join $filename)
-    mut events = []
-    mut ok = true
-    mut error = null
+    let archive = ([$dst_dir $filename] | path join)
     let etype = (infer_archive_type $filename)
-
-    mkdir $target_dir | ignore
-    ^curl --fail --silent --show-error -L -o $archive $url
+    
+    mut events = []
+    
+    # Ensure dst_dir
+    let mk = (ensure_dir $host $dst_dir --sudo=$sudo)
+    if ($mk.exit_code != 0) { error make { msg: $"mkdir failed: ($mk.stderr)" } }
+    
+    # Download
+    let dl = (ssh_run $host $"if command -v curl >/dev/null 2>&1; then curl -fsSL '($url)' -o '($archive)'; elif command -v wget >/dev/null 2>&1; then wget -qO '($archive)' '($url)'; else echo 'ERR:NO_DOWNLOADER' >&2; exit 127; fi" --sudo=$sudo)
+    if ($dl.exit_code != 0) { error make { msg: $"download failed: ($dl.stderr)" } }
     $events = ($events | append "downloaded")
-    if ($etype != "file") {
-        extract_archive $archive $etype $target_dir
-        $events = ($events | append "extracted")
-        if ($etype in ["tar.gz", "tar.xz", "zip", "tar"]) {
-            rm -f $archive
-            $events = ($events | append "removed-archive")
+    
+    if $extract {
+        # Extract logic on remote
+        let cmd = (match $etype {
+            "tar.gz" => { $"tar -xzf '($archive)' -C '($dst_dir)'" }
+            "tar.xz" => { $"tar -xJf '($archive)' -C '($dst_dir)'" }
+            "zip" => { $"unzip -o '($archive)' -d '($dst_dir)'" }
+            "tar" => { $"tar -xf '($archive)' -C '($dst_dir)'" }
+            "gz" => { $"gunzip -f '($archive)'" }
+            "xz" => { $"unxz -f '($archive)'" }
+            _ => { "" }
+        })
+        
+        if ($cmd | is-not-empty) {
+            let ex = (ssh_run $host $cmd --sudo=$sudo)
+            if ($ex.exit_code != 0) { error make { msg: $"extract failed: ($ex.stderr)" } }
+            $events = ($events | append "extracted")
+            
+            if ($etype in ["tar.gz", "tar.xz", "zip", "tar"]) {
+                ssh_run $host $"rm -f '($archive)'" --sudo=$sudo | ignore
+                $events = ($events | append "removed-archive")
+            }
         }
-    } else {
-        $events = ($events | append "no-extract")
     }
-
+    
     {
-        name: ($d.name? | default null),
-        version: ($d.version? | default null),
+        host: ($host.name | default (build_target $host).login),
+        name: ($d.name? | default $filename),
         url: $url,
-        download_dir: $target_dir,
-        archive: $archive,
-        extract_type: $etype,
-        ok: $ok,
-        events: $events,
-        error: $error,
+        dst_dir: $dst_dir,
+        ok: true,
+        events: $events
     }
 }
 
-export def download_items [downloads_conf: record, names?: list<string> = []] {
-    let dir = ($downloads_conf.download_dir | path expand)
+export def download_items_remote [downloads_conf: record, hosts: list<record>, names?: list<string> = [], --sudo=false] {
     let items = (
         if ($names | is-empty) {
             $downloads_conf.downloads | where { |d| ($d.enable? | default true) }
@@ -451,5 +471,104 @@ export def download_items [downloads_conf: record, names?: list<string> = []] {
             $downloads_conf.downloads | where { |d| $set | any {|n| $n == ($d.name | into string) } }
         }
     )
-    $items | each {|d| download_one $dir $d }
+    
+    $hosts | each {|h|
+        $items | each {|d|
+            try {
+                remote_download_item $h $d --sudo=$sudo
+            } catch {|e|
+                { host: ($h.name | default (build_target $h).login), name: ($d.name? | default "unknown"), ok: false, error: $e.msg }
+            }
+        }
+    } | flatten
+}
+
+# -------------------------------
+# Copy helpers
+# -------------------------------
+
+export def load_copies [path: string] {
+    mut p = $path
+    if (not ($p | path exists)) {
+        error make { msg: $"Config not found: ($path)" }
+    }
+    let raw = (open --raw $p)
+    let data = ($raw | from toml)
+    let items = ($data.copy? | default [])
+    { copies: $items }
+}
+
+export def copy_item_host [host: record, item: record, --sudo=false] {
+    let src = $item.src
+    let dst = $item.dst
+    let mode = ($item.mode? | default "0755")
+    
+    # Script to run on remote
+    # We use single quotes for variables to handle spaces, so we must escape them for ssh_run
+    let script = ([
+        $"src='($src)'",
+        $"dst='($dst)'",
+        $"mode='($mode)'",
+        '',
+        'if [ ! -f "$src" ]; then',
+        '    echo "ERR:SRC_MISSING: $src"',
+        '    exit 1',
+        'fi',
+        '',
+        'mkdir -p "$(dirname "$dst")"',
+        '',
+        'get_hash() {',
+        '    if [ ! -f "$1" ]; then echo "MISSING"; return; fi',
+        '    if command -v sha256sum >/dev/null 2>&1; then sha256sum -b "$1" | cut -d " " -f1',
+        '    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d " " -f1',
+        '    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed -e "s/^.*= //"',
+        '    else echo "NONE"; fi',
+        '}',
+        '',
+        'h_src=$(get_hash "$src")',
+        'h_dst=$(get_hash "$dst")',
+        '',
+        'if [ "$h_src" = "NONE" ] || [ "$h_src" != "$h_dst" ]; then',
+        '    if cp "$src" "$dst"; then',
+        '        chmod "$mode" "$dst"',
+        '        echo "CHANGED"',
+        '    else',
+        '        exit 1',
+        '    fi',
+        'else',
+        '    echo "UNCHANGED"',
+        'fi'
+    ] | str join "\n")
+    # Escape single quotes for ssh_run which wraps cmd in single quotes
+    let safe_script = ($script | str replace -a "'" "'\\''")
+    
+    let res = (ssh_run $host $safe_script --sudo=$sudo)
+    
+    if ($res.exit_code != 0) {
+        { host: ($host.name | default (build_target $host).login), name: ($item.name? | default "unknown"), changed: false, error: ($res.stderr | str trim) }
+    } else {
+        let out = ($res.stdout | str trim | lines | last)
+        if ($out == "CHANGED") {
+             { host: ($host.name | default (build_target $host).login), name: ($item.name? | default "unknown"), src: $src, dst: $dst, changed: true, reason: "copied" }
+        } else {
+             { host: ($host.name | default (build_target $host).login), name: ($item.name? | default "unknown"), src: $src, dst: $dst, changed: false, reason: "up-to-date" }
+        }
+    }
+}
+
+export def copy_items_cmd [copy_conf: record, hosts: list<record>, names?: list<string> = [], --sudo=false] {
+    let items = (
+        if ($names | is-empty) {
+            $copy_conf.copies | where { |d| ($d.enable? | default true) }
+        } else {
+            let set = ($names | each {|n| $n | str trim } | uniq)
+            $copy_conf.copies | where { |d| $set | any {|n| $n == ($d.name | into string) } }
+        }
+    )
+    
+    $hosts | each {|h|
+        $items | each {|it|
+            copy_item_host $h $it --sudo=$sudo
+        }
+    } | flatten
 }
