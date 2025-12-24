@@ -17,6 +17,7 @@ name = "localhost"
 ip = "127.0.0.1"
 port = 22
 user = "akagi201"
+shell = "zsh" # Optional: override shell wrapper (default "sh") to load correct profile/env
 enable = true
 group = "prod"
 
@@ -89,9 +90,9 @@ Note: After nupm install, `nudeploy` runs `nudeploy.nu`. The Bash wrapper `nudep
 
 ```shell
 # All enabled services
-nudeploy plan --group prod
+nudeploy deploy --dry-run --group prod
 # Single service
-nudeploy plan --service axon --group prod
+nudeploy deploy --dry-run --service axon --group prod
 ```
 
 - Deploy to a group (idempotent):
@@ -136,13 +137,13 @@ nudeploy hosts --group prod
 - Run a shell command on targets:
 
 ```shell
-nudeploy shell --group prod --cmd 'uname -a'
+nudeploy exec "uname -a" --group prod
 ```
 
 - Run a playbook (line-by-line, stop on error):
 
 ```shell
-nudeploy play --group prod --file playbooks/arch.nu
+nudeploy exec playbooks/arch.nu --group prod
 ```
 
 - Download artifacts locally (curl + extract):
@@ -161,14 +162,13 @@ nudeploy download --config ./nudeploy.toml
 ## Options
 
 - --config: Path to config TOML (default: ./nudeploy.toml)
-- --service: Service name from config (optional for plan/deploy/status/restart). If omitted, acts on all services with `enable = true`.
+- --service: Service name from config (optional for deploy/status/restart). If omitted, acts on all services with `enable = true`.
 - --group: Hosts group
 - --hosts: Comma-separated hostnames (SSH Host aliases)
-- --cmd: Command to run for shell
-- --file: Path to playbook file for `play` (one command per line; `#` comments and blank lines ignored)
 - --sudo: Use sudo for systemd actions (daemon-reload/enable/start/restart) and installing unit files into /etc. All other file and directory operations run as the SSH user.
 - --json: Emit JSON output suitable for CI
 - --name: For `download`, comma-separated artifact names to fetch (defaults to all enabled)
+- --dry-run: For `deploy`, show what would change without applying (formerly `plan`)
 
 ## Idempotency strategy
 
@@ -311,6 +311,7 @@ Note: The main entry is `nudeploy.sh`. You can symlink it to `nudeploy` to match
 - Remote not systemd: this tool targets systemd-based Linux. Non-systemd hosts aren’t supported.
 - Unit not restarting: with `restart = true`, restarts occur when files changed; otherwise not.
 - File destinations: ensure the destination parent directory exists or is creatable; we auto-create with `mkdir -p` when needed.
+- PATH issues in `exec`: If commands like `mise` are missing, ensure they are in `~/.profile` (for sh/bash) or `~/.zprofile` (for zsh). You can also set `shell = "zsh"` in `[[hosts]]` config to use zsh as the wrapper shell.
 
 ## Environment variables
 

@@ -18,6 +18,7 @@ enable = true
 name = "localhost"
 ip = "127.0.0.1"
 port = 22
+shell = "zsh"
 user = "akagi201"
 enable = true
 group = "prod"

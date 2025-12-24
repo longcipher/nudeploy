@@ -39,7 +39,7 @@ export def build_service_meta [svc: record] {
     let name = ($svc.name)
     let src_dir = ($svc.src_dir)
     let dst_dir = ($svc.dst_dir)
-    let unit_file0 = ($svc.unit_file)
+    let unit_file0 = ($svc.unit_file? | default $"($name).service")
     let unit_file = (if ((($unit_file0 | path type) == "file") or ($unit_file0 | str starts-with "/")) { $unit_file0 } else { [$src_dir $unit_file0] | path join })
     let unit_dest = $"/etc/systemd/system/($name).service"
     let restart_mode = (if ($svc.restart? | default false) { "on-change" } else { "never" })
@@ -112,7 +112,24 @@ export def ssh_connect [h: record] {
 export def ssh_run [h: record, cmd: string, --sudo=false] {
     let t = (build_target $h)
     let socket = (get_socket_path $h)
-    let full = (if $sudo { $"sudo -n sh -lc '($cmd)'" } else { $"sh -lc '($cmd)'" })
+    let shell_bin = ($h.shell? | default "sh")
+    let is_zsh = ($shell_bin | str ends-with "zsh")
+    
+    # Use -lc (login) but avoid -i (interactive) to prevent ZLE/terminfo errors
+    let flags = "-lc"
+
+    # Escape single quotes for the shell command wrapper
+    let safe_cmd = ($cmd | str replace -a "'" "'\\''")
+    
+    # For zsh, manually source .zshrc to load env vars (like mise/PATH), 
+    # but suppress stderr/stdout to avoid noise from interactive plugins (oh-my-zsh).
+    let final_cmd = if $is_zsh {
+        $"[ -f ~/.zshrc ] && source ~/.zshrc >/dev/null 2>&1; ($safe_cmd)"
+    } else {
+        $safe_cmd
+    }
+
+    let full = (if $sudo { $"sudo -n ($shell_bin) ($flags) '($final_cmd)'" } else { $"($shell_bin) ($flags) '($final_cmd)'" })
     
     let common_opts = ["-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=accept-new"]
     let socket_opts = (if ($socket | path exists) { ["-S" $socket] } else { [] })
