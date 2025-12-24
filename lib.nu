@@ -55,6 +55,7 @@ export def build_service_meta [svc: record] {
         let dest_path = (if ($to | str starts-with "/") { $to } else { [$dst_dir $to] | path join })
         { from: $from, to: $to, from_type: (if $is_url { "url" } else { "local" }), local_path: $local_path, url: (if $is_url { $from } else { null }), dest_path: $dest_path, mode: $mode_val, chmod_after: $has_chmod }
     })
+    let sync_mode = ($svc.sync_mode? | default "scp")
     {
         service_name: $name,
         src_dir: $src_dir,
@@ -64,6 +65,7 @@ export def build_service_meta [svc: record] {
         restart: $restart_mode,
         enable: $enable_service,
         sync_items: $sync_items,
+        sync_mode: $sync_mode,
     }
 }
 
@@ -76,23 +78,74 @@ def build_target [h: record] {
     { login: $login, port: $port }
 }
 
+def get_socket_path [h: record] {
+    let t = (build_target $h)
+    let safe_login = ($t.login | str replace -a "@" "_" | str replace -a "." "_")
+    let port_suffix = (if ($t.port != null) { $"-($t.port)" } else { "" })
+    $"/tmp/nudeploy-($safe_login)($port_suffix).sock"
+}
+
+export def ssh_connect [h: record] {
+    let socket = (get_socket_path $h)
+    # Check if socket is active
+    if ($socket | path exists) {
+        let check = (^ssh -O check -S $socket ignored-host | complete)
+        if ($check.exit_code == 0) { return }
+        # Stale socket
+        rm -f $socket
+    }
+    
+    let t = (build_target $h)
+    let port_args = (if ($t.port != null) { ["-p" ($t.port | into string)] } else { [] })
+    
+    # Start master connection
+    # -M: master mode
+    # -f: background
+    # -N: no command
+    # -o ControlPersist=5m: keep open for 5 mins
+    let res = (^ssh -M -f -N -o ControlPersist=5m -S $socket -o BatchMode=yes -o StrictHostKeyChecking=accept-new ...$port_args $t.login | complete)
+    if ($res.exit_code != 0) {
+        print $"Warning: Failed to establish SSH master connection: ($res.stderr)"
+    }
+}
+
 export def ssh_run [h: record, cmd: string, --sudo=false] {
     let t = (build_target $h)
+    let socket = (get_socket_path $h)
     let full = (if $sudo { $"sudo -n sh -lc '($cmd)'" } else { $"sh -lc '($cmd)'" })
-    if ($t.port == null) {
-        (^ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new $t.login $full | complete)
-    } else {
-        (^ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ($t.port | into string) $t.login $full | complete)
-    }
+    
+    let common_opts = ["-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=accept-new"]
+    let socket_opts = (if ($socket | path exists) { ["-S" $socket] } else { [] })
+    let port_opts = (if ($t.port != null) { ["-p" ($t.port | into string)] } else { [] })
+    
+    (^ssh ...$common_opts ...$socket_opts ...$port_opts $t.login $full | complete)
 }
 
 export def scp_upload [h: record, local: string, remote: string] {
     let t = (build_target $h)
-    if ($t.port == null) {
-        (^scp -q -p $local $"($t.login):($remote)" | complete)
+    let socket = (get_socket_path $h)
+    
+    let common_opts = ["-q" "-p"]
+    let socket_opts = (if ($socket | path exists) { ["-o" $"ControlPath=($socket)"] } else { [] })
+    let port_opts = (if ($t.port != null) { ["-P" ($t.port | into string)] } else { [] })
+    
+    (^scp ...$common_opts ...$socket_opts ...$port_opts $local $"($t.login):($remote)" | complete)
+}
+
+export def rsync_upload [h: record, local: string, remote: string] {
+    let t = (build_target $h)
+    let socket = (get_socket_path $h)
+    
+    let ssh_cmd = (if ($socket | path exists) {
+        $"ssh -S ($socket)"
     } else {
-        (^scp -q -P ($t.port | into string) -p $local $"($t.login):($remote)" | complete)
-    }
+        if ($t.port != null) { $"ssh -p ($t.port)" } else { "ssh" }
+    })
+    
+    # -a: archive (recursive, preserves times, perms, etc)
+    # -z: compress
+    # -q: quiet
+    (^rsync -azq -e $ssh_cmd $local $"($t.login):($remote)" | complete)
 }
 
 
@@ -146,8 +199,14 @@ export def compare_and_upload [h: record, svc: record, local_path: string, dest_
     } else {
             let uid = (random uuid)
             let tmp = $"/tmp/nudeploy-($svc.service_name)-($dest_path | path basename)-($uid).tmp"
-            let res1 = (scp_upload $h $local_path $tmp)
-            if ($res1.exit_code != 0) { error make { msg: $"scp failed: ($res1.stderr)" } }
+            
+            let res1 = (if ($svc.sync_mode == "rsync") {
+                rsync_upload $h $local_path $tmp
+            } else {
+                scp_upload $h $local_path $tmp
+            })
+            
+            if ($res1.exit_code != 0) { error make { msg: $"upload failed: ($res1.stderr)" } }
             let res2 = (install_file $h $tmp $dest_path $mode --sudo=$sudo)
             if ($res2.exit_code != 0) {
                 let hint = (if ((not $sudo) and ($res2.stderr | str contains "Permission denied") and ($dest_path | str starts-with "/etc/")) { " (unit under /etc; try --sudo)" } else { "" })
@@ -191,6 +250,7 @@ export def is_enabled [h: record, svc_name: string, --sudo=false] { let r = (ssh
 export def is_active [h: record, svc_name: string, --sudo=false] { let r = (ssh_run $h $"systemctl is-active '($svc_name)'" --sudo=$sudo); $r.exit_code == 0 }
 
 export def plan_host [meta: record, host: record, --sudo=false] {
+    ssh_connect $host
     let unit_local = (local_sha256 $meta.unit_file)
     let unit_remote = (remote_sha256 $host $meta.unit_dest --sudo=$sudo)
     let unit_action = (if ($unit_remote != $unit_local) { "upload-unit" } else { "ok" })
@@ -242,6 +302,7 @@ export def plan_host [meta: record, host: record, --sudo=false] {
 }
 
 export def deploy_host [meta: record, host: record, --sudo=false] {
+    ssh_connect $host
     try {
         mut changed = false
         mut events = []
@@ -316,6 +377,7 @@ export def deploy_host [meta: record, host: record, --sudo=false] {
 }
 
 export def status_host [meta: record, host: record, --sudo=false] {
+    ssh_connect $host
     let enabled = (is_enabled $host $meta.service_name --sudo=$sudo)
     let active = (is_active $host $meta.service_name --sudo=$sudo)
     let info = (ssh_run $host $"systemctl show '($meta.service_name)' --no-page --property=MainPID,ExecMainStatus,ExecMainStartTimestamp,FragmentPath,ActiveState,UnitFileState" --sudo=$sudo)
@@ -324,12 +386,14 @@ export def status_host [meta: record, host: record, --sudo=false] {
 }
 
 export def restart_host [meta: record, host: record, --sudo=false] {
+    ssh_connect $host
     let r = (systemd_action $host $meta.service_name "restart" --sudo=$sudo)
     { host: ($host.name | default (build_target $host).login), ok: ($r.exit_code == 0), event: { type: "systemd", action: "restart" } }
 }
 
 # shell command across hosts
 export def shell_host [host: record, cmd: string, --sudo=false] {
+    ssh_connect $host
     let res = (ssh_run $host $cmd --sudo=$sudo)
     { host: ($host.name | default (build_target $host).login), exit: $res.exit_code, stdout: ($res.stdout | str trim), stderr: ($res.stderr | str trim) }
 }
@@ -364,6 +428,7 @@ export def parse_playbook [path: string] {
 }
 
 export def play_host [host: record, steps: list<record>, --sudo=false] {
+    ssh_connect $host
     mut events = []
     mut ok = true
     mut failed_line = null
@@ -473,6 +538,7 @@ export def download_items_remote [downloads_conf: record, hosts: list<record>, n
     )
     
     $hosts | each {|h|
+        ssh_connect $h
         $items | each {|d|
             try {
                 remote_download_item $h $d --sudo=$sudo
@@ -567,6 +633,7 @@ export def copy_items_cmd [copy_conf: record, hosts: list<record>, names?: list<
     )
     
     $hosts | each {|h|
+        ssh_connect $h
         $items | each {|it|
             copy_item_host $h $it --sudo=$sudo
         }
