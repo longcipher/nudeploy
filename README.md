@@ -1,5 +1,10 @@
 # nudeploy
 
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/longcipher/nudeploy)
+[![Context7](https://img.shields.io/badge/Website-context7.com-blue)](https://context7.com/longcipher/nudeploy)
+
+![hpx](https://socialify.git.ci/longcipher/nudeploy/image?font=Source+Code+Pro&language=1&name=1&owner=1&pattern=Circuit+Board&theme=Auto)
+
 A tiny, stable, idempotent deployment helper to roll out a systemd service to multiple remote hosts using:
 
 - Nushell for orchestration
@@ -140,10 +145,14 @@ nudeploy hosts --group prod
 nudeploy exec "uname -a" --group prod
 ```
 
-- Run a playbook (line-by-line, stop on error):
+- Run a playbook (script execution, stop on error):
 
 ```shell
-nudeploy exec playbooks/arch.nu --group prod
+# Run silently (shows only last command output)
+nudeploy exec playbooks/arch.sh --group prod
+
+# Run verbosely (shows every command and its output)
+nudeploy exec playbooks/arch.sh --group prod -v
 ```
 
 - Download artifacts locally (curl + extract):
@@ -187,19 +196,29 @@ nudeploy download --config ./nudeploy.toml
 
 ### Playbooks
 
-Playbooks are simple text files that nudeploy executes remotely, one command per line. Ensure each line is idempotent. On the first failure (non-zero exit code), execution stops for that host and the failing line and command are reported. Use `--sudo` when commands require privileges.
+Playbooks are shell scripts (Bash syntax) that nudeploy executes remotely over a single SSH session.
+
+- **Single Session**: Context is preserved between lines (e.g., `cd /tmp` affects subsequent commands).
+- **Automatic Error Handling**: `set -e` is automatically prepended, so execution stops immediately if any command fails.
+- **Verbose Mode (`-v`)**: Shows every executed command (prefixed with `👉 [Line N]`) and its output interleaved.
+- **Quiet Mode (default)**: Shows only the output of the *last* executed command (useful for status checks).
 
 Example `playbooks/bootstrap.sh`:
 
-```sh
-# Ensure curl exists
-which curl >/dev/null 2>&1 || (apt-get update -y && apt-get install -y curl)
+```bash
+# Context is preserved
+cd /tmp
+curl -L -o app.tar.gz https://example.com/app.tar.gz
 
-# Create user if missing
-id -u deploy >/dev/null 2>&1 || useradd -m -s /bin/bash deploy
+# Variables work
+APP_DIR="/opt/app"
+mkdir -p "$APP_DIR"
+tar -xzf app.tar.gz -C "$APP_DIR"
 
-# Ensure directory and ownership
-mkdir -p /opt/myapp && chown -R deploy:deploy /opt/myapp
+# Logic works
+if ! id -u deploy >/dev/null 2>&1; then
+    useradd -m -s /bin/bash deploy
+fi
 ```
 
 ## Dev tips

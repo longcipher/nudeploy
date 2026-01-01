@@ -18,6 +18,7 @@
 # @flag --sudo          Use sudo -n for remote privileged actions (install to /etc, systemctl)
 # @flag --json          Emit JSON records suitable for CI (changes/events/status per host)
 # @flag --dry-run       For deploy: show what would change without applying (formerly plan)
+# @flag --verbose (-v)  For exec: show every shell command and its output
 #
 # @example nudeploy deploy --service helix --group web --sudo
 # @example nudeploy deploy --dry-run --service helix --hosts h1,h2

@@ -14,6 +14,7 @@ export def main [
   --name: string # For download/copy: comma-separated item names
   --json # Emit JSON records for CI-friendly output
   --dry-run # For deploy: show changes without applying them (formerly 'plan')
+  --verbose (-v) # For exec: show every shell command and its output
 ] {
   let cfg_path = (if ($config | is-empty) { ([$env.PWD "nudeploy.toml"] | path join) } else { $config })
   let cfg = (load_config $cfg_path)
@@ -38,19 +39,17 @@ export def main [
         
         if ($payload | path exists) {
             # Playbook mode
-            let lines = (parse_playbook $payload)
-            let rows = ($target_hosts | each {|h| play_host $h $lines --sudo=$sudo })
+            let script = (open --raw $payload)
+            let rows = ($target_hosts | each {|h| play_host $h $script --sudo=$sudo --verbose=$verbose })
             if $json {
               $rows
             } else {
-              let summary = ($rows | each {|r| { host: $r.host ok: $r.ok failed_line: ($r.failed_line? | default null) exit: ($r.exit? | default null) } })
+              let summary = ($rows | each {|r| { host: $r.host ok: $r.ok exit: $r.exit } })
               $summary | table -e
               for r in $rows {
-                if (not $r.ok) {
-                  print $"\nHost: ($r.host) FAILED at line ($r.failed_line)"
-                  print $"Cmd:    (($r.failed_cmd? | default ""))"
-                  let se = ($r.stderr? | default "")
-                  if ($se | is-not-empty) { print $"Stderr: ($se)" }
+                print $"\nHost: ($r.host) - Exit: ($r.exit)"
+                if ($r.stdout | is-not-empty) {
+                    print $r.stdout
                 }
               }
               $summary

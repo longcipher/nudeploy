@@ -109,7 +109,7 @@ export def ssh_connect [h: record] {
     }
 }
 
-export def ssh_run [h: record, cmd: string, --sudo=false] {
+export def ssh_run [h: record, cmd: string, --sudo=false, --with-stderr=false] {
     let t = (build_target $h)
     let socket = (get_socket_path $h)
     let shell_bin = ($h.shell? | default "sh")
@@ -130,12 +130,13 @@ export def ssh_run [h: record, cmd: string, --sudo=false] {
     }
 
     let full = (if $sudo { $"sudo -n ($shell_bin) ($flags) '($final_cmd)'" } else { $"($shell_bin) ($flags) '($final_cmd)'" })
+    let full_with_stderr = if $with_stderr { $"($full) 2>&1" } else { $full }
     
     let common_opts = ["-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=accept-new"]
     let socket_opts = (if ($socket | path exists) { ["-S" $socket] } else { [] })
     let port_opts = (if ($t.port != null) { ["-p" ($t.port | into string)] } else { [] })
     
-    (^ssh ...$common_opts ...$socket_opts ...$port_opts $t.login $full | complete)
+    (^ssh ...$common_opts ...$socket_opts ...$port_opts $t.login $full_with_stderr | complete)
 }
 
 export def scp_upload [h: record, local: string, remote: string] {
@@ -425,53 +426,79 @@ export def list_hosts_cmd [cfg: record, group?: string, --all=false] {
 # -------------------------------
 
 # -------------------------------
-# Playbook helpers (line-by-line Nushell/bash commands over SSH)
+# Playbook helpers (Single SSH session script execution)
 # -------------------------------
 
-export def parse_playbook [path: string] {
-    let raw = (open --raw $path)
-    $raw
-    | lines
-    | enumerate
-    | reduce -f [] {|it, acc|
-        let line_no = ($it.index + 1)
-        let line = ($it.item | str trim)
-        if (($line | is-empty) or ($line | str starts-with "#")) {
-            $acc
-        } else {
-            $acc | append { line: $line_no, cmd: $it.item }
-        }
-    }
-}
-
-export def play_host [host: record, steps: list<record>, --sudo=false] {
+export def play_host [host: record, script: string, --sudo=false, --verbose=false] {
     ssh_connect $host
-    mut events = []
-    mut ok = true
-    mut failed_line = null
-    mut failed_cmd = null
-    mut exit = 0
-    mut stderr = ""
-    for s in $steps {
-        let res = (ssh_run $host $s.cmd --sudo=$sudo)
-        $events = ($events | append { line: $s.line cmd: $s.cmd exit: $res.exit_code stdout: ($res.stdout | str trim) stderr: ($res.stderr | str trim) })
-        if ($res.exit_code != 0) {
-            $ok = false
-            $failed_line = $s.line
-            $failed_cmd = $s.cmd
-            $exit = $res.exit_code
-            $stderr = ($res.stderr | str trim)
-            break
+    
+    # Always use set -ex and PS4 to track execution for both verbose and non-verbose modes
+    # This allows us to capture the last command's output for non-verbose mode
+    let ps4_marker = "+__NU__:"
+    let flags = $"export PS4='($ps4_marker)%N:%i> '; set -ex"
+    let final_script = $"($flags)\n($script)"
+    
+    # Always merge stderr to interleave command trace with output
+    let res = (ssh_run $host $final_script --sudo=$sudo --with-stderr=true)
+    
+    let raw_lines = ($res.stdout | lines)
+    
+    mut processed_output = []
+    mut current_cmd_output = []
+    
+    for line in $raw_lines {
+        if ($line | str starts-with $ps4_marker) {
+            # It's a trace line
+            # Format: +__NU__:name:line> command
+            # Use regex to parse safely
+            let parsed = ($line | parse --regex '^\+__NU__:(?<name>[^:]*):(?<line>[0-9]+)> (?<cmd>.*)$')
+            
+            if ($parsed | is-empty) {
+                # Fallback if regex fails (shouldn't happen if PS4 matches)
+                $current_cmd_output = ($current_cmd_output | append $line)
+                $processed_output = ($processed_output | append $line)
+            } else {
+                let p = ($parsed | first)
+                let name = $p.name
+                
+                # Filter internal shell stuff
+                if ($name == "") or ($name == "zsh") or ($name == "bash") or ($name == "%N") {
+                    # It's a user command
+                    
+                    # Adjust line number (minus 1 because of the prepended flags line)
+                    let line_num = (($p.line | into int) - 1)
+                    
+                    # Reconstruct the trace line with emoji
+                    let new_trace = $"👉 [Line ($line_num)] ($p.cmd)"
+                    
+                    # Start new block for this command
+                    $current_cmd_output = [$new_trace]
+                    
+                    $processed_output = ($processed_output | append $new_trace)
+                } else {
+                    # Internal function trace, ignore
+                }
+            }
+        } else {
+            # It's output
+            $current_cmd_output = ($current_cmd_output | append $line)
+            $processed_output = ($processed_output | append $line)
         }
     }
+    
+    let final_stdout = if $verbose {
+        ($processed_output | str join "\n")
+    } else {
+        # For non-verbose, return the output of the last command
+        ($current_cmd_output | str join "\n")
+    }
+
     {
         host: ($host.name | default (build_target $host).login),
-        ok: $ok,
-        failed_line: $failed_line,
-        failed_cmd: $failed_cmd,
-        exit: $exit,
-        stderr: $stderr,
-        events: $events
+        ok: ($res.exit_code == 0),
+        exit: $res.exit_code,
+        stdout: $final_stdout,
+        stderr: "" # Merged into stdout
     }
 }
 
