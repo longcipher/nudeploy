@@ -5,6 +5,8 @@
 
 ![hpx](https://socialify.git.ci/longcipher/nudeploy/image?font=Source+Code+Pro&language=1&name=1&owner=1&pattern=Circuit+Board&theme=Auto)
 
+In the AI era, Python is the best scripting language, bar none. use [shellflow](https://github.com/longcipher/shellflow) instead
+
 A tiny, stable, idempotent deployment helper to roll out a systemd service to multiple remote hosts using:
 
 - Nushell for orchestration
